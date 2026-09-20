@@ -174,6 +174,10 @@ function defaultNode(kind) {
   if (kind === 'splice') {
     n.name = nextDesignator('S');
     n.attrs = { type: 'Splice', style: 'simple' };
+  } else if (kind === 'component') {
+    n.name = nextDesignator('D');
+    n.attrs = { description: '', manufacturer: '', mpn: '', pn: '', notes: '' };
+    n.interfaces = [defaultInterface()];
   } else if (kind === 'connector') {
     n.name = nextDesignator('X');
     n.attrs = { type: '', subtype: '', pincount: 4, pinlabels: [] };
@@ -191,11 +195,25 @@ function defaultPins(node) {
     const pc = parseInt(node.attrs.pincount, 10);
     return pc > 1 ? '1-' + pc : '1';
   }
+  if (node.kind === 'component') {
+    const iface = (node.interfaces || [])[0];
+    const pc = iface ? parseInt(iface.pincount, 10) : 0;
+    return pc > 1 ? '1-' + pc : '1';
+  }
   if (node.kind === 'cable') {
     const wc = parseInt(node.attrs.wirecount, 10);
     return wc > 1 ? '1-' + wc : '1';
   }
   return '';
+}
+
+// Default connection item for a whole-block connect.
+function defaultItem(node) {
+  const it = { nodeId: node.id, pins: defaultPins(node) };
+  if (node.kind === 'component' && node.interfaces && node.interfaces[0]) {
+    it.iface = node.interfaces[0].id;
+  }
+  return it;
 }
 
 // Number of pins/wires a pins-string refers to ("1-4" -> 4, "1,3,5" -> 3, "s" -> 1).
@@ -261,18 +279,55 @@ function imageExportObject(img, src) {
   return o;
 }
 
-function buildConnectionSet(conn) {
+function sanitizeDesignator(name) {
+  return String(name || '').trim().replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'C';
+}
+
+// Allocate a unique WireViz designator for a component terminal group.
+// Single unnamed-group components export under the bare tag; multi-group
+// components (or any group when there are several) get TAG_GROUPNAME.
+function allocateDesignator(node, iface, used) {
+  const tag = sanitizeDesignator(node.name);
+  const multi = (node.interfaces || []).length > 1;
+  const ifName = multi ? (sanitizeDesignator(iface.name) || 'IF') : '';
+  let d = ifName ? tag + '_' + ifName : tag;
+  const base = d;
+  let i = 2;
+  while (used.has(d)) { d = base + '_' + i; i += 1; }
+  used.add(d);
+  return d;
+}
+
+function componentConnectorAttrs(node, iface, imgFile) {
+  const attrs = {};
+  if (node.attrs.description) attrs.type = node.attrs.description;
+  const pc = parseInt(iface.pincount, 10);
+  if (pc) attrs.pincount = pc;
+  if (Array.isArray(iface.pinlabels) && iface.pinlabels.length) attrs.pinlabels = iface.pinlabels.slice();
+  for (const k of ['manufacturer', 'mpn', 'pn', 'notes']) {
+    if (node.attrs[k]) attrs[k] = node.attrs[k];
+  }
+  if (node.attrs.image && node.attrs.image.src) {
+    attrs.image = imageExportObject(node.attrs.image, imgFile ? imgFile.path : node.attrs.image.src);
+  }
+  return attrs;
+}
+
+function buildConnectionSet(conn, compDesignators) {
   const items = conn.items.map((it) => {
     const node = nodeById(it.nodeId);
     if (!node || node.kind === 'note') return null;
+    const designator = node.kind === 'component'
+      ? ((compDesignators.get(node.id) || new Map()).get(it.iface) || node.name)
+      : node.name;
     const pins = pinsToYamlValue(it.pins);
-    return pins === null ? node.name : { [node.name]: pins };
+    return pins === null ? designator : { [designator]: pins };
   });
   if (items.some((i) => i === null)) return null;
 
-  // Connector-to-connector sets are mates and need arrow entries between them.
+  // Terminal-to-terminal sets are mates and need arrow entries between them.
   const nodes = conn.items.map((it) => nodeById(it.nodeId));
-  if (conn.items.length === 2 && nodes[0].kind === 'connector' && nodes[1].kind === 'connector') {
+  if (conn.items.length === 2 && isTerminalNode(nodes[0]) && isTerminalNode(nodes[1])) {
     const a = (conn.items[0].pins || '').trim();
     const b = (conn.items[1].pins || '').trim();
     if (a && b) {
@@ -280,7 +335,8 @@ function buildConnectionSet(conn) {
       if (pinListLength(b) !== count) return null; // caller warns
       return [items[0], Array(count).fill('-->'), items[1]];
     }
-    return [nodes[0].name, '==>', nodes[1].name];
+    // component-level mate: designator (optionally with ignored pin list) + ==>
+    return [items[0], '==>', items[1]];
   }
   return items;
 }
@@ -301,8 +357,21 @@ function exportYamlDoc(srcBase) {
 
   const connectors = {};
   const cables = {};
+  const compDesignators = new Map(); // component nodeId -> Map(ifaceId -> designator)
+  const usedNames = new Set();
   for (const n of doc.nodes) {
     if (n.kind === 'note') continue;
+    if (n.kind === 'component') {
+      const ifMap = new Map();
+      for (const iface of (n.interfaces || [])) {
+        const d = allocateDesignator(n, iface, usedNames);
+        ifMap.set(iface.id, d);
+        connectors[d] = componentConnectorAttrs(n, iface, imageByNode.get(n.id));
+      }
+      compDesignators.set(n.id, ifMap);
+      continue;
+    }
+    usedNames.add(n.name);
     const attrs = Object.assign({}, n.attrs);
     if (attrs.image && attrs.image.src) {
       const f = imageByNode.get(n.id);
@@ -329,7 +398,7 @@ function exportYamlDoc(srcBase) {
 
   const sets = [];
   for (const conn of doc.connections) {
-    const s = buildConnectionSet(conn);
+    const s = buildConnectionSet(conn, compDesignators);
     if (s) sets.push(s);
   }
   if (sets.length) out.connections = sets;
@@ -497,12 +566,40 @@ function isSimpleConnector(n) {
   return n.kind === 'connector' && n.attrs.style === 'simple';
 }
 
+// Nodes that present terminals (export as WireViz connectors).
+function isTerminalNode(n) {
+  return n.kind === 'connector' || n.kind === 'component';
+}
+
+function defaultInterface() {
+  return { id: uid(), name: 'Terminals', pincount: 4, pinlabels: [] };
+}
+
+function interfaceById(node, ifaceId) {
+  return (node.interfaces || []).find((f) => f.id === ifaceId) || (node.interfaces || [])[0] || null;
+}
+
 function nodeSize(n) {
   if (n.kind === 'note') {
     const lines = wrapText(n.text || '', 26);
     return { w: 180, h: 26 + lines.length * 14 + 10 };
   }
   if (isSimpleConnector(n)) return { w: 110, h: 48 };
+  if (n.kind === 'component') {
+    let h = 22 + 16; // tag band + description
+    const img = n.attrs.image && n.attrs.image.src ? imageDisplaySize(n.attrs.image) : null;
+    if (img) h += img.h + 6;
+    for (const iface of (n.interfaces || [])) {
+      h += 14; // group title
+      const rows = iface.pinlabels && iface.pinlabels.length
+        ? Math.min(iface.pinlabels.length, 12)
+        : Math.min(parseInt(iface.pincount, 10) || 1, 12);
+      h += Math.max(1, rows) * 13 + 2;
+      if ((iface.pinlabels && iface.pinlabels.length > 12) || (parseInt(iface.pincount, 10) || 0) > 12) h += 13;
+    }
+    if (n.attrs.manufacturer || n.attrs.mpn) h += 14;
+    return { w: 175, h: Math.max(70, h + 8) };
+  }
   const img = n.attrs.image && n.attrs.image.src ? imageDisplaySize(n.attrs.image) : null;
   let contentH = 22 + 16; // title + subtitle
   if (img) contentH += img.h + 6;
@@ -620,6 +717,51 @@ function renderNode(n) {
   svgEl('rect', { class: 'node-box', width: size.w, height: size.h, rx: 8 }, g);
   svgEl('text', { class: 'node-name', x: 10, y: 17 }, g).textContent = n.kind === 'note' ? 'Note' : n.name;
 
+  if (n.kind === 'component') {
+    // device-style block: dark tag band, description, photo, terminal groups, footer
+    svgEl('rect', { class: 'node-header', x: 1, y: 1, width: size.w - 2, height: 19, rx: 7 }, g);
+    svgEl('rect', { class: 'node-header', x: 1, y: 11, width: size.w - 2, height: 9 }, g);
+    svgEl('text', { class: 'node-name', x: 10, y: 15 }, g).textContent = n.name;
+    let y = 34;
+    if (n.attrs.description) {
+      svgEl('text', { class: 'node-sub', x: 10, y: y - 4 }, g).textContent = n.attrs.description;
+    }
+    y += 4;
+    const cimg = n.attrs.image && n.attrs.image.src ? n.attrs.image : null;
+    if (cimg && cimg.src.startsWith('data:')) {
+      const dim = imageDisplaySize(cimg);
+      svgEl('image', {
+        href: cimg.src, x: (size.w - dim.w) / 2, y: y, width: dim.w, height: dim.h,
+        preserveAspectRatio: 'xMidYMid meet',
+      }, g);
+      y += dim.h + 6;
+    }
+    for (const iface of (n.interfaces || [])) {
+      svgEl('text', { class: 'iface-title', x: 10, y: y + 8 }, g).textContent = iface.name || 'Terminals';
+      y += 14;
+      const labels = iface.pinlabels && iface.pinlabels.length ? iface.pinlabels : null;
+      const count = labels ? labels.length : (parseInt(iface.pincount, 10) || 0);
+      const shown = Math.min(count, 12);
+      for (let i = 0; i < shown; i++) {
+        const rowY = y + 11 + i * 13;
+        svgEl('text', { class: 'node-line', x: 12, y: rowY }, g)
+          .textContent = (i + 1) + ': ' + (labels ? (labels[i] || '') : '');
+        svgEl('circle', pinAttrs(n, i + 1, 'left', 7, rowY - 4, iface.id), g);
+        svgEl('circle', pinAttrs(n, i + 1, 'right', size.w - 7, rowY - 4, iface.id), g);
+      }
+      y += shown * 13 + 2;
+      if (count > 12) {
+        svgEl('text', { class: 'node-info', x: 12, y: y + 4 }, g).textContent = '+' + (count - 12) + ' more';
+        y += 13;
+      }
+    }
+    const footer = [n.attrs.manufacturer, n.attrs.mpn].filter(Boolean).join(' · ');
+    if (footer) svgEl('text', { class: 'node-footer', x: 10, y: size.h - 6 }, g).textContent = footer;
+    svgEl('circle', { class: 'handle', cx: 0, cy: size.h / 2, r: 5, 'data-handle': 'left', 'data-node': n.id }, g);
+    svgEl('circle', { class: 'handle', cx: size.w, cy: size.h / 2, r: 5, 'data-handle': 'right', 'data-node': n.id }, g);
+    return g;
+  }
+
   if (isSimpleConnector(n)) {
     const sub = [n.attrs.type, n.attrs.subtype].filter(Boolean).join(' · ');
     svgEl('text', { class: 'node-sub', x: 10, y: 34 }, g).textContent = sub || 'simple';
@@ -694,19 +836,23 @@ function renderNode(n) {
   return g;
 }
 
-function pinAttrs(n, pin, side, cx, cy) {
-  const pending = pendingPin && pendingPin.nodeId === n.id && pendingPin.pin === pin && pendingPin.side === side;
-  return {
+function pinAttrs(n, pin, side, cx, cy, ifaceId) {
+  const pending = pendingPin && pendingPin.nodeId === n.id && pendingPin.pin === pin &&
+    pendingPin.side === side && pendingPin.iface === ifaceId;
+  const attrs = {
     class: 'pin' + (pending ? ' pending' : ''),
     cx, cy, r: 3.5,
     'data-pin-node': n.id, 'data-pin': pin, 'data-side': side,
   };
+  if (ifaceId) attrs['data-iface'] = ifaceId;
+  return attrs;
 }
 
 // World-space position of a rendered pin dot (reads the live SVG geometry).
-function pinAnchorPos(nodeId, pin, side) {
-  const c = worldEl.querySelector(
-    'circle.pin[data-pin-node="' + nodeId + '"][data-pin="' + pin + '"][data-side="' + side + '"]');
+function pinAnchorPos(nodeId, pin, side, ifaceId) {
+  let sel = 'circle.pin[data-pin-node="' + nodeId + '"][data-pin="' + pin + '"][data-side="' + side + '"]';
+  if (ifaceId) sel += '[data-iface="' + ifaceId + '"]';
+  const c = worldEl.querySelector(sel);
   if (!c) return null;
   const g = c.closest('g.node');
   if (!g) return null;
@@ -743,10 +889,11 @@ canvasEl.addEventListener('pointerdown', (e) => {
     const nodeId = pinTarget.getAttribute('data-pin-node');
     const pin = pinTarget.getAttribute('data-pin');
     const side = pinTarget.getAttribute('data-side');
+    const iface = pinTarget.getAttribute('data-iface') || undefined;
     const node = nodeById(nodeId);
     if (node) {
-      const from = pinAnchorPos(nodeId, pin, side) || screenToWorld(e.clientX, e.clientY);
-      drag = { type: 'pin', nodeId, pin, side, sx: e.clientX, sy: e.clientY, moved: false, from, to: from };
+      const from = pinAnchorPos(nodeId, pin, side, iface) || screenToWorld(e.clientX, e.clientY);
+      drag = { type: 'pin', nodeId, pin, side, iface, sx: e.clientX, sy: e.clientY, moved: false, from, to: from };
       canvasEl.setPointerCapture(e.pointerId);
     }
   } else if (handleTarget) {
@@ -813,7 +960,7 @@ canvasEl.addEventListener('pointerup', (e) => {
   if (!drag) return;
   if (drag.type === 'pin') {
     if (!drag.moved) {
-      handlePinClick(drag.nodeId, drag.pin, drag.side);
+      handlePinClick(drag.nodeId, drag.pin, drag.side, drag.iface);
     } else {
       // dragged between pins/components: drop on a pin for pin-to-pin, else on a block
       const candidates = document.elementsFromPoint(e.clientX, e.clientY);
@@ -823,8 +970,8 @@ canvasEl.addEventListener('pointerup', (e) => {
         const dropNodeId = dropPin.getAttribute('data-pin-node');
         if (dropNodeId !== drag.nodeId) {
           connectPins(
-            { nodeId: drag.nodeId, pin: Number(drag.pin) },
-            { nodeId: dropNodeId, pin: Number(dropPin.getAttribute('data-pin')) }
+            { nodeId: drag.nodeId, pin: Number(drag.pin), iface: drag.iface },
+            { nodeId: dropNodeId, pin: Number(dropPin.getAttribute('data-pin')), iface: dropPin.getAttribute('data-iface') || undefined }
           );
         }
       } else if (dropNode) {
@@ -918,18 +1065,18 @@ function connect(a, b) {
     return;
   }
   // extend a partial set that ends with this cable
-  if (a.kind === 'cable' && b.kind === 'connector') {
+  if (a.kind === 'cable' && isTerminalNode(b)) {
     const partial = doc.connections.find((c) =>
       c.items.length && c.items[c.items.length - 1].nodeId === a.id &&
       !c.items.some((i) => i.nodeId === b.id));
-    if (partial) { partial.items.push({ nodeId: b.id, pins: defaultPins(b) }); finishConnect(); return; }
+    if (partial) { partial.items.push(defaultItem(b)); finishConnect(); return; }
   }
-  // prepend a connector to a partial set that starts with this cable
-  if (a.kind === 'connector' && b.kind === 'cable') {
+  // prepend a terminal to a partial set that starts with this cable
+  if (isTerminalNode(a) && b.kind === 'cable') {
     const partial = doc.connections.find((c) =>
       c.items.length && c.items[0].nodeId === b.id &&
       !c.items.some((i) => i.nodeId === a.id));
-    if (partial) { partial.items.unshift({ nodeId: a.id, pins: defaultPins(a) }); finishConnect(); return; }
+    if (partial) { partial.items.unshift(defaultItem(a)); finishConnect(); return; }
   }
   // dedupe identical 2-participant sets
   const exists = doc.connections.some((c) => c.items.length === 2 &&
@@ -937,13 +1084,7 @@ function connect(a, b) {
      (c.items[0].nodeId === b.id && c.items[1].nodeId === a.id)));
   if (exists) { toast('Already connected'); return; }
 
-  doc.connections.push({
-    id: uid(),
-    items: [
-      { nodeId: a.id, pins: defaultPins(a) },
-      { nodeId: b.id, pins: defaultPins(b) },
-    ],
-  });
+  doc.connections.push({ id: uid(), items: [defaultItem(a), defaultItem(b)] });
   finishConnect();
 }
 
@@ -954,22 +1095,22 @@ function finishConnect() {
 
 /* ---- pin-level connect ---- */
 
-function handlePinClick(nodeId, pin, side) {
+function handlePinClick(nodeId, pin, side, iface) {
   const node = nodeById(nodeId);
   if (!node || node.kind === 'note') return;
   if (!pendingPin) {
-    pendingPin = { nodeId, pin: Number(pin), side };
+    pendingPin = { nodeId, pin: Number(pin), side, iface };
     renderCanvas();
     return;
   }
-  if (pendingPin.nodeId === nodeId && pendingPin.pin === Number(pin)) {
+  if (pendingPin.nodeId === nodeId && pendingPin.pin === Number(pin) && pendingPin.iface === iface) {
     pendingPin = null; // toggle off
     renderCanvas();
     return;
   }
   const first = pendingPin;
   pendingPin = null;
-  connectPins(first, { nodeId, pin: Number(pin), side });
+  connectPins(first, { nodeId, pin: Number(pin), side, iface });
 }
 
 function appendPin(pins, p) {
@@ -989,8 +1130,8 @@ function connectPins(pa, pb) {
     return;
   }
 
-  // connector <-> connector: accumulate pins into one mate set
-  if (A.kind === 'connector' && B.kind === 'connector') {
+  // terminal <-> terminal: accumulate pins into one mate set
+  if (isTerminalNode(A) && isTerminalNode(B)) {
     const existing = doc.connections.find((c) => c.items.length === 2 &&
       ((c.items[0].nodeId === A.id && c.items[1].nodeId === B.id) ||
        (c.items[0].nodeId === B.id && c.items[1].nodeId === A.id)));
@@ -999,21 +1140,20 @@ function connectPins(pa, pb) {
       existing.items[iA].pins = appendPin(existing.items[iA].pins, pa.pin);
       existing.items[1 - iA].pins = appendPin(existing.items[1 - iA].pins, pb.pin);
     } else {
-      doc.connections.push({
-        id: uid(),
-        items: [
-          { nodeId: A.id, pins: String(pa.pin) },
-          { nodeId: B.id, pins: String(pb.pin) },
-        ],
-      });
+      const itemA = { nodeId: A.id, pins: String(pa.pin) };
+      const itemB = { nodeId: B.id, pins: String(pb.pin) };
+      if (pa.iface) itemA.iface = pa.iface;
+      if (pb.iface) itemB.iface = pb.iface;
+      doc.connections.push({ id: uid(), items: [itemA, itemB] });
     }
     finishConnect();
     return;
   }
 
-  // connector <-> cable: extend a partial set or create one
-  const conn = A.kind === 'connector' ? A : B;
-  const connPin = A.kind === 'connector' ? pa.pin : pb.pin;
+  // terminal <-> cable: extend a partial set or create one
+  const conn = isTerminalNode(A) ? A : B;
+  const connPin = isTerminalNode(A) ? pa.pin : pb.pin;
+  const connIface = isTerminalNode(A) ? pa.iface : pb.iface;
   const cab = A.kind === 'cable' ? A : B;
   const wirePin = A.kind === 'cable' ? pa.pin : pb.pin;
 
@@ -1021,7 +1161,9 @@ function connectPins(pa, pb) {
     c.items.length && c.items[c.items.length - 1].nodeId === cab.id &&
     !c.items.some((i) => i.nodeId === conn.id));
   if (partialEnd) {
-    partialEnd.items.push({ nodeId: conn.id, pins: String(connPin) });
+    const item = { nodeId: conn.id, pins: String(connPin) };
+    if (connIface) item.iface = connIface;
+    partialEnd.items.push(item);
     finishConnect();
     return;
   }
@@ -1029,16 +1171,17 @@ function connectPins(pa, pb) {
     c.items.length && c.items[0].nodeId === cab.id &&
     !c.items.some((i) => i.nodeId === conn.id));
   if (partialStart) {
-    partialStart.items.unshift({ nodeId: conn.id, pins: String(connPin) });
+    const item = { nodeId: conn.id, pins: String(connPin) };
+    if (connIface) item.iface = connIface;
+    partialStart.items.unshift(item);
     finishConnect();
     return;
   }
+  const itemC = { nodeId: conn.id, pins: String(connPin) };
+  if (connIface) itemC.iface = connIface;
   doc.connections.push({
     id: uid(),
-    items: [
-      { nodeId: conn.id, pins: String(connPin) },
-      { nodeId: cab.id, pins: String(wirePin) },
-    ],
+    items: [itemC, { nodeId: cab.id, pins: String(wirePin) }],
   });
   finishConnect();
 }
@@ -1121,7 +1264,9 @@ function renderInspector() {
 
 function renderNodeInspector(n) {
   el('h2', {}, inspectorEl).textContent =
-    n.kind === 'connector' ? 'Connector' : n.kind === 'cable' ? 'Cable' : 'Note';
+    n.kind === 'component' ? 'Component (field device)'
+      : n.kind === 'connector' ? 'Connector'
+        : n.kind === 'cable' ? 'Cable' : 'Note';
 
   if (n.kind !== 'note') {
     const nameInput = textInput(n.name, (v) => {
@@ -1129,12 +1274,24 @@ function renderNodeInspector(n) {
       nameInput.classList.toggle('invalid', duplicateNames().has(n.name));
       refreshCanvas();
     });
-    field('Designator (unique)', nameInput, inspectorEl);
+    field(n.kind === 'component' ? 'Tag (e.g. LT-100)' : 'Designator (unique)', nameInput, inspectorEl);
     if (duplicateNames().has(n.name)) nameInput.classList.add('invalid');
   }
 
   if (n.kind === 'note') {
     field('Text', areaInput(n.text, (v) => { n.text = v; refreshCanvas(); }, 6), inspectorEl);
+  } else if (n.kind === 'component') {
+    field('Description', textInput(n.attrs.description, (v) => { n.attrs.description = v; refreshCanvas(); }), inspectorEl);
+    field('Manufacturer', textInput(n.attrs.manufacturer, (v) => { n.attrs.manufacturer = v; refreshCanvas(); }), inspectorEl);
+    const row = el('div', { class: 'field-row' }, inspectorEl);
+    field('MPN', textInput(n.attrs.mpn, (v) => { n.attrs.mpn = v; refreshCanvas(); }), row);
+    field('P/N', textInput(n.attrs.pn, (v) => { n.attrs.pn = v; refreshCanvas(); }), row);
+    field('Notes (location, service info…)', areaInput(n.attrs.notes, (v) => {
+      if (v) n.attrs.notes = v; else delete n.attrs.notes;
+      refreshCanvas();
+    }, 3), inspectorEl);
+    renderImageFields(n);
+    renderTerminalGroups(n);
   } else {
     field('Type', textInput(n.attrs.type, (v) => { n.attrs.type = v; refreshCanvas(); }), inspectorEl);
 
@@ -1192,6 +1349,53 @@ function renderNodeInspector(n) {
     .textContent = 'Delete block';
 }
 
+function renderTerminalGroups(n) {
+  el('h2', {}, inspectorEl).textContent = 'Terminal groups';
+  el('p', { class: 'hint' }, inspectorEl).textContent =
+    'Each group exports as its own connector (TAG_GROUP for multi-group devices).';
+  (n.interfaces || []).forEach((iface, idx) => {
+    const box = el('div', { class: 'iface-box' }, inspectorEl);
+    const head = el('div', { class: 'field-row' }, box);
+    field('Group name', textInput(iface.name, (v) => { iface.name = v; refreshCanvas(); }), head);
+    if ((n.interfaces || []).length > 1) {
+      const rmWrap = el('div', { class: 'field' }, head);
+      el('button', {
+        class: 'danger',
+        title: 'Remove terminal group',
+        onclick: () => {
+          n.interfaces.splice(idx, 1);
+          if (!n.interfaces.length) n.interfaces.push(defaultInterface());
+          // drop dangling iface references in connections
+          for (const c of doc.connections) {
+            for (const it of c.items) {
+              if (it.nodeId === n.id && it.iface && !interfaceById(n, it.iface)) delete it.iface;
+            }
+          }
+          refreshAll();
+        },
+      }, rmWrap).textContent = '×';
+    }
+    const row2 = el('div', { class: 'field-row' }, box);
+    field('Pin count', numInput(iface.pincount, (v) => { iface.pincount = v === '' ? '' : v; refreshCanvas(); }), row2);
+    field('Pin labels (one per line)', areaInput(
+      (iface.pinlabels || []).join('\n'),
+      (v) => {
+        const lines = v.split('\n').map((s) => s.trim());
+        while (lines.length && lines[lines.length - 1] === '') lines.pop();
+        iface.pinlabels = lines;
+        refreshCanvas();
+      }
+    , 4), box);
+  });
+  const add = el('div', { class: 'inspector-actions' }, inspectorEl);
+  el('button', {
+    onclick: () => {
+      n.interfaces.push({ id: uid(), name: 'Group ' + ((n.interfaces || []).length + 1), pincount: 4, pinlabels: [] });
+      refreshAll();
+    },
+  }, add).textContent = '+ Add terminal group';
+}
+
 function renderImageFields(n) {
   el('h2', {}, inspectorEl).textContent = 'Image';
   const img = n.attrs.image;
@@ -1221,8 +1425,8 @@ function renderConnectionInspector(c) {
     const node = nodeById(item.nodeId);
     if (!node) return;
     const row = el('div', { class: 'part-row' }, inspectorEl);
-    el('span', { class: 'part-name', title: node.name }, row).textContent = node.name;
-    const input = el('input', { type: 'text', value: item.pins || '', placeholder: node.kind === 'connector' ? 'pins' : 'wires' });
+    el('span', { class: 'part-name', title: itemLabel(item) }, row).textContent = itemLabel(item);
+    const input = el('input', { type: 'text', value: item.pins || '', placeholder: node.kind === 'cable' ? 'wires' : 'pins' });
     input.addEventListener('input', () => { item.pins = input.value.trim(); refreshCanvas(); });
     row.appendChild(input);
     el('button', {
@@ -1287,6 +1491,18 @@ function renderWireProperties(cableNode) {
 
 /* ============================== panels & lists ============================== */
 
+// Human label for a connection participant, e.g. "X1:1-4" or "VFD1·MTR:1-3".
+function itemLabel(it) {
+  const n = nodeById(it.nodeId);
+  if (!n) return '?';
+  let label = n.name;
+  if (n.kind === 'component' && it.iface && (n.interfaces || []).length > 1) {
+    const iface = interfaceById(n, it.iface);
+    if (iface && iface.name) label += '·' + iface.name;
+  }
+  return it.pins ? label + ':' + it.pins : label;
+}
+
 function renderConnectionList() {
   connectionListEl.textContent = '';
   if (!doc.connections.length) {
@@ -1296,11 +1512,7 @@ function renderConnectionList() {
   }
   for (const c of doc.connections) {
     const li = el('li', { class: isSelected('connection', c.id) ? 'selected' : '' }, connectionListEl);
-    li.textContent = c.items.map((it) => {
-      const n = nodeById(it.nodeId);
-      if (!n) return '?';
-      return it.pins ? n.name + ':' + it.pins : n.name;
-    }).join(' — ');
+    li.textContent = c.items.map(itemLabel).join(' — ');
     li.addEventListener('click', () => {
       select('connection', c.id);
       renderCanvas(); renderInspector(); renderConnectionList();
@@ -1690,8 +1902,22 @@ function demoDoc() {
     id: uid(), kind: 'connector', name: 'X2', x: 740, y: 80,
     attrs: { type: 'Molex KK 254', subtype: 'female', pincount: 3, pinlabels: ['GND', 'RX', 'TX'] },
   };
-  const note = { id: uid(), kind: 'note', name: '', x: 400, y: 320, text: 'Select a block to edit it.\nDrag handles to connect.\nDelete key removes selection.', attrs: {} };
-  d.nodes = [x1, w1, x2, note];
+  const note = { id: uid(), kind: 'note', name: '', x: 400, y: 320, text: 'Select a block to edit it.\nDrag handles or pins to connect.\nDelete key removes selection.', attrs: {} };
+  const lt = {
+    id: uid(), kind: 'component', name: 'LT-100', x: 60, y: 330,
+    attrs: {
+      description: 'Level transmitter',
+      manufacturer: 'Endress+Hauser',
+      mpn: 'LMI21',
+      notes: 'Installed on tank T-1',
+    },
+    interfaces: [{ id: uid(), name: 'Signal', pincount: 2, pinlabels: ['+', '-'] }],
+  };
+  const w2 = {
+    id: uid(), kind: 'cable', name: 'W2', x: 400, y: 430,
+    attrs: { type: 'LiYCY 2x0.5', wirecount: 2, color_code: 'DIN', length: '15 m', shield: true },
+  };
+  d.nodes = [x1, w1, x2, note, lt, w2];
   d.connections = [
     { id: uid(), items: [
       { nodeId: x1.id, pins: '5,2,3' },
@@ -1701,6 +1927,11 @@ function demoDoc() {
     { id: uid(), items: [
       { nodeId: x1.id, pins: '5' },
       { nodeId: w1.id, pins: 's' },
+    ] },
+    { id: uid(), items: [
+      { nodeId: lt.id, pins: '1,2', iface: lt.interfaces[0].id },
+      { nodeId: w2.id, pins: '1,2' },
+      { nodeId: x1.id, pins: '6,7' },
     ] },
   ];
   return d;

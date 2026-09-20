@@ -53,17 +53,18 @@ function check(name, cond, extra) {
   // 1. demo doc loaded
   await page.waitForSelector(".node", { timeout: 5000 });
   const nodeCount = await page.locator(".node").count();
-  check("demo doc renders 4 nodes", nodeCount === 4, "count=" + nodeCount);
+  check("demo doc renders 6 nodes", nodeCount === 6, "count=" + nodeCount);
 
   // 2. YAML panel populated
   const yaml = await page.inputValue("#yaml-view");
   check("yaml has connectors", /connectors:/.test(yaml) && /X1:/.test(yaml));
   check("yaml has connections", /connections:/.test(yaml) && /W1:/.test(yaml));
+  check("demo component exports as connector", /LT-100:[\s\S]*?Level transmitter/.test(yaml));
 
   // 3. add a connector via palette
   await page.click('.palette-item[data-kind="connector"]');
   const afterAdd = await page.locator(".node").count();
-  check("palette adds connector", afterAdd === 5, "count=" + afterAdd);
+  check("palette adds connector", afterAdd === 7, "count=" + afterAdd);
 
   // 4. drag a node (X2) by -80,+40 (leftward, stays inside the canvas)
   const x2 = page.locator('.node[data-id]').filter({ hasText: "X2" }).first();
@@ -78,7 +79,7 @@ function check(name, cond, extra) {
 
   // 5. connect X2 (right handle) to the new connector via handle drag
   const connCountBefore = await page.locator(".conn").count();
-  const newX = page.locator(".node").nth(4); // newly added connector
+  const newX = page.locator(".node").nth(6); // newly added connector
   const nb = await newX.boundingBox();
   // drag from X2's right handle (exact circle center) to new node body
   const handle = page.locator('g.node:has-text("X2") circle.handle[data-handle="right"]');
@@ -111,6 +112,27 @@ function check(name, cond, extra) {
   await page.waitForTimeout(400);
   const yamlPins = await page.inputValue("#yaml-view");
   check("pin mate lands in yaml", /X1: 1[\s\S]*?-->[\s\S]*?X2: 1/.test(yamlPins) || /X1: 1/.test(yamlPins));
+
+  // 5f. component block: add, describe, wire a pin to a fresh cable
+  await page.click('.palette-item[data-kind="component"]');
+  const compCount = await page.locator('g.node:has-text("D1")').count();
+  check("palette adds component D1", compCount >= 1, "count=" + compCount);
+  await page.locator('g.node:has-text("D1")').first().click();
+  await page.getByLabel("Description").fill("Test device");
+  await page.waitForTimeout(400);
+  const yamlComp = await page.inputValue("#yaml-view");
+  check("component exports tag + description", /D1:[\s\S]*?type: Test device/.test(yamlComp));
+  await page.click('.palette-item[data-kind="cable"]'); // W3
+  const d1pin = await page.locator('g.node:has-text("D1") circle.pin[data-pin="1"]').first().boundingBox();
+  const w3pin = await page.locator('g.node:has-text("W3") circle.pin[data-pin="1"]').first().boundingBox();
+  await page.mouse.move(d1pin.x + d1pin.width / 2, d1pin.y + d1pin.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(w3pin.x + w3pin.width / 2, w3pin.y + w3pin.height / 2, { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  const listComp = await page.locator("#connection-list").textContent();
+  check("component pin wires to cable", listComp.includes("D1:1") && listComp.includes("W3:1"),
+    listComp.slice(-60));
 
   // 5d. pin-to-pin DRAG appends to the same mate set
   const p1 = await page.locator('g.node:has-text("X1") circle.pin[data-pin="2"]').first().boundingBox();
@@ -171,6 +193,7 @@ function check(name, cond, extra) {
   check("wireviz render produces svg", svgHtml.includes("<svg"), "len=" + svgHtml.length);
   check("render includes pinlabels", /DCD/.test(svgHtml));
   check("render embeds uploaded image", /data:image\/png;base64/.test(svgHtml));
+  check("render includes component type", /Test device/.test(svgHtml));
 
   // 10b. BOM tab populated from the real render
   await page.click('.tabs .tab[data-tab="bom"]');

@@ -110,6 +110,12 @@ aside h2:first-child { margin-top: 0; }
 .node.cable .node-box { fill: var(--cable-fill); }
 .node.note .node-box { fill: var(--note-fill); }
 .node.selected .node-box { stroke: var(--accent); stroke-width: 2; }
+.node.component .node-box { fill: #fdfeff; stroke: #475569; stroke-width: 1.4; }
+.node.component .node-header { fill: #334155; }
+.node.component .node-name { fill: #f8fafc; }
+.node.component.selected .node-box { stroke: var(--accent); }
+.node.component .iface-title { font-size: 10px; font-weight: 700; fill: #475569; }
+.node.component .node-footer { font-size: 10px; fill: #64748b; }
 .node-name { font-weight: 700; font-size: 13px; fill: var(--text); }
 .node-sub { font-size: 10.5px; fill: var(--muted); }
 .node-line { font-size: 10.5px; fill: #334155; font-family: ui-monospace, Menlo, Consolas, monospace; }
@@ -146,6 +152,7 @@ aside h2:first-child { margin-top: 0; }
 .field .check input { width: auto; }
 .field-row { display: flex; gap: 6px; }
 .field-row .field { flex: 1; }
+.iface-box { border: 1px solid var(--border); border-radius: 6px; padding: 6px; margin-bottom: 8px; }
 .image-preview { max-width: 100%; max-height: 110px; border: 1px solid var(--border); border-radius: 5px; display: block; margin-bottom: 4px; }
 .inspector-actions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
 .inspector-empty { color: var(--muted); font-size: 13px; }
