@@ -19,6 +19,6 @@ Routine notes:
 
 ## Next
 
-- [ ] Deploy: create GitHub repo (`gh repo create wireviz-gui --public`), push `v0:main`, enable Pages
-- [ ] After deploy: verify health check turns OK, then e2e routine runs green against the live site
+- [x] Deploy: repo created, `v0` pushed to `main`, GitHub Pages enabled — live at https://schneiderwastaken.github.io/wireviz-gui/
+- [x] After deploy: health check OK (all assets 200); e2e routine green against the live site (24/24)
 - [ ] Phase 3 candidates: self-hosted Pyodide for full offline use, per-pin wire labels, splice auto-insert between cable ends
