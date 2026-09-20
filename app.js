@@ -565,6 +565,12 @@ function renderCanvas() {
       x1: drag.from.x, y1: drag.from.y, x2: drag.to.x, y2: drag.to.y,
     }, worldEl);
   }
+  if (drag && drag.type === 'pin' && drag.moved) {
+    svgEl('line', {
+      class: 'temp-line',
+      x1: drag.from.x, y1: drag.from.y, x2: drag.to.x, y2: drag.to.y,
+    }, worldEl);
+  }
   applyView();
 }
 
@@ -697,6 +703,21 @@ function pinAttrs(n, pin, side, cx, cy) {
   };
 }
 
+// World-space position of a rendered pin dot (reads the live SVG geometry).
+function pinAnchorPos(nodeId, pin, side) {
+  const c = worldEl.querySelector(
+    'circle.pin[data-pin-node="' + nodeId + '"][data-pin="' + pin + '"][data-side="' + side + '"]');
+  if (!c) return null;
+  const g = c.closest('g.node');
+  if (!g) return null;
+  const tf = /translate\(([-\d.]+)[, ]([-\d.]+)\)/.exec(g.getAttribute('transform') || '');
+  if (!tf) return null;
+  return {
+    x: parseFloat(tf[1]) + parseFloat(c.getAttribute('cx')),
+    y: parseFloat(tf[2]) + parseFloat(c.getAttribute('cy')),
+  };
+}
+
 function colorHex(c) {
   const s = String(c || '').toUpperCase();
   if (COLOR_HEX[s]) return COLOR_HEX[s];
@@ -724,8 +745,8 @@ canvasEl.addEventListener('pointerdown', (e) => {
     const side = pinTarget.getAttribute('data-side');
     const node = nodeById(nodeId);
     if (node) {
-      const w = screenToWorld(e.clientX, e.clientY);
-      drag = { type: 'pin', nodeId, pin, side, sx: e.clientX, sy: e.clientY };
+      const from = pinAnchorPos(nodeId, pin, side) || screenToWorld(e.clientX, e.clientY);
+      drag = { type: 'pin', nodeId, pin, side, sx: e.clientX, sy: e.clientY, moved: false, from, to: from };
       canvasEl.setPointerCapture(e.pointerId);
     }
   } else if (handleTarget) {
@@ -775,6 +796,13 @@ canvasEl.addEventListener('pointermove', (e) => {
       drag.moved = true;
       renderCanvas();
     }
+  } else if (drag.type === 'pin') {
+    const dist = Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy);
+    if (dist > 6) {
+      drag.moved = true;
+      drag.to = screenToWorld(e.clientX, e.clientY);
+      renderCanvas();
+    }
   } else if (drag.type === 'connect') {
     drag.to = screenToWorld(e.clientX, e.clientY);
     renderCanvas();
@@ -784,8 +812,27 @@ canvasEl.addEventListener('pointermove', (e) => {
 canvasEl.addEventListener('pointerup', (e) => {
   if (!drag) return;
   if (drag.type === 'pin') {
-    const moved = Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy);
-    if (moved < 6) handlePinClick(drag.nodeId, drag.pin, drag.side);
+    if (!drag.moved) {
+      handlePinClick(drag.nodeId, drag.pin, drag.side);
+    } else {
+      // dragged between pins/components: drop on a pin for pin-to-pin, else on a block
+      const candidates = document.elementsFromPoint(e.clientX, e.clientY);
+      const dropPin = candidates.map((c) => c.closest && c.closest('.pin')).find(Boolean);
+      const dropNode = candidates.map((c) => c.closest && c.closest('.node')).find(Boolean);
+      if (dropPin) {
+        const dropNodeId = dropPin.getAttribute('data-pin-node');
+        if (dropNodeId !== drag.nodeId) {
+          connectPins(
+            { nodeId: drag.nodeId, pin: Number(drag.pin) },
+            { nodeId: dropNodeId, pin: Number(dropPin.getAttribute('data-pin')) }
+          );
+        }
+      } else if (dropNode) {
+        const fromNode = nodeById(drag.nodeId);
+        const toNode = nodeById(dropNode.getAttribute('data-id'));
+        if (fromNode && toNode && fromNode.id !== toNode.id) connect(fromNode, toNode);
+      }
+    }
     drag = null;
     renderCanvas();
     return;
@@ -829,6 +876,19 @@ document.addEventListener('keydown', (e) => {
   } else if ((e.ctrlKey || e.metaKey) && e.key === 's') {
     e.preventDefault();
     saveProject();
+  }
+});
+
+canvasEl.addEventListener('dblclick', (e) => {
+  const connTarget = e.target.closest && e.target.closest('.conn-hit');
+  if (!connTarget) return;
+  const connEl = connTarget.closest('.conn');
+  const conn = connEl && connById(connEl.getAttribute('data-conn'));
+  if (conn) {
+    select('connection', conn.id);
+    renderCanvas();
+    renderInspector();
+    renderConnectionList();
   }
 });
 
@@ -1175,9 +1235,54 @@ function renderConnectionInspector(c) {
       },
     }, row).textContent = '×';
   });
+
+  // Wire properties for the cable participant (double-click a wire to get here).
+  const cableNode = c.items.map((it) => nodeById(it.nodeId)).find((n) => n && n.kind === 'cable');
+  if (cableNode) {
+    renderWireProperties(cableNode);
+  } else {
+    el('p', { class: 'hint' }, inspectorEl).textContent =
+      'Mate connection (no wires). Route through a cable to give it signals, colors and properties.';
+  }
+
   const actions = el('div', { class: 'inspector-actions' }, inspectorEl);
   el('button', { class: 'danger', onclick: () => { select('connection', c.id); deleteSelection(); } }, actions)
     .textContent = 'Delete connection';
+}
+
+function renderWireProperties(cableNode) {
+  el('h2', {}, inspectorEl).textContent = 'Wire properties (' + cableNode.name + ')';
+  el('p', { class: 'hint' }, inspectorEl).textContent =
+    'Stored on cable ' + cableNode.name + ' and shown in the rendered diagram.';
+  field('Wire labels / signals (one per wire — e.g. 12V, GND, DATA)', areaInput(
+    (cableNode.attrs.wirelabels || []).join('\n'),
+    (v) => {
+      const lines = v.split('\n').map((s) => s.trim());
+      while (lines.length && lines[lines.length - 1] === '') lines.pop();
+      if (lines.length) cableNode.attrs.wirelabels = lines; else delete cableNode.attrs.wirelabels;
+      refreshCanvas();
+    }
+  , 5), inspectorEl);
+  field('Wire colors (comma-sep, overrides color code)', textInput(
+    Array.isArray(cableNode.attrs.colors) ? cableNode.attrs.colors.join(',') : '',
+    (v) => {
+      const list = v.split(',').map((s) => s.trim()).filter(Boolean);
+      if (list.length) cableNode.attrs.colors = list; else delete cableNode.attrs.colors;
+      refreshCanvas();
+    }
+  ), inspectorEl);
+  const row = el('div', { class: 'field-row' }, inspectorEl);
+  field('Gauge', textInput(cableNode.attrs.gauge, (v) => { cableNode.attrs.gauge = v; refreshCanvas(); }), row);
+  field('Length', textInput(cableNode.attrs.length, (v) => { cableNode.attrs.length = v; refreshCanvas(); }), row);
+  field('Cable type', textInput(cableNode.attrs.type, (v) => { cableNode.attrs.type = v; refreshCanvas(); }), inspectorEl);
+  field('', checkInput(cableNode.attrs.shield === true, 'Shielded', (v) => {
+    if (v) cableNode.attrs.shield = true; else delete cableNode.attrs.shield;
+    refreshCanvas();
+  }), inspectorEl);
+  field('Notes', areaInput(cableNode.attrs.notes, (v) => {
+    if (v) cableNode.attrs.notes = v; else delete cableNode.attrs.notes;
+    refreshCanvas();
+  }, 3), inspectorEl);
 }
 
 /* ============================== panels & lists ============================== */
@@ -1660,8 +1765,49 @@ document.querySelectorAll('.tabs .tab').forEach((b) => {
 
 $('panel-toggle').addEventListener('click', () => {
   const panel = $('bottom-panel');
-  panel.classList.toggle('collapsed');
-  $('panel-toggle').textContent = panel.classList.contains('collapsed') ? '▴' : '▾';
+  const collapsed = panel.classList.toggle('collapsed');
+  $('panel-toggle').textContent = collapsed ? '▴' : '▾';
+  if (!collapsed) {
+    const saved = parseInt(localStorage.getItem('wireviz-gui:panel-h') || '', 10);
+    panel.style.height = (saved >= 100 ? saved : 240) + 'px';
+  }
+  toastEl.style.bottom = (panel.getBoundingClientRect().height + 16) + 'px';
+});
+
+/* ---- bottom panel resize ---- */
+
+const bottomPanel = $('bottom-panel');
+const panelResizer = $('panel-resizer');
+let panelDrag = null;
+
+function setPanelHeight(px) {
+  const h = clamp(Math.round(px), 100, Math.floor(window.innerHeight * 0.75));
+  bottomPanel.style.height = h + 'px';
+  toastEl.style.bottom = (h + 16) + 'px';
+}
+
+(function initPanelHeight() {
+  const saved = parseInt(localStorage.getItem('wireviz-gui:panel-h') || '', 10);
+  if (saved >= 100) setPanelHeight(saved);
+  toastEl.style.bottom = (bottomPanel.getBoundingClientRect().height + 16) + 'px';
+})();
+
+panelResizer.addEventListener('pointerdown', (e) => {
+  panelDrag = { startY: e.clientY, startH: bottomPanel.getBoundingClientRect().height };
+  panelResizer.classList.add('dragging');
+  panelResizer.setPointerCapture(e.pointerId);
+  e.preventDefault();
+});
+panelResizer.addEventListener('pointermove', (e) => {
+  if (!panelDrag) return;
+  setPanelHeight(panelDrag.startH + (panelDrag.startY - e.clientY));
+});
+panelResizer.addEventListener('pointerup', () => {
+  if (!panelDrag) return;
+  panelDrag = null;
+  panelResizer.classList.remove('dragging');
+  const h = Math.round(bottomPanel.getBoundingClientRect().height);
+  localStorage.setItem('wireviz-gui:panel-h', String(h));
 });
 
 $('zoom-in').addEventListener('click', () => { view.scale = clamp(view.scale * 1.2, 0.25, 4); applyView(); });

@@ -164,7 +164,13 @@ aside h2:first-child { margin-top: 0; }
   flex-direction: column;
   min-height: 0;
 }
-#bottom-panel.collapsed { height: 34px; }
+#bottom-panel.collapsed { height: 34px !important; }
+#panel-resizer {
+  flex: 0 0 6px;
+  cursor: ns-resize;
+  background: transparent;
+}
+#panel-resizer:hover, #panel-resizer.dragging { background: var(--accent-soft); }
 #bottom-panel.collapsed .tab-body { display: none !important; }
 .tabs {
   display: flex;

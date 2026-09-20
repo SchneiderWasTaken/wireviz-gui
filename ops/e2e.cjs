@@ -43,13 +43,12 @@ function check(name, cond, extra) {
 }
 
 (async () => {
-  const BASE_URL = (process.env.WIREVIZ_GUI_URL || "http://127.0.0.1:8377/index.html").replace(/\/?$/, "/index.html");
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   page.on("pageerror", (e) => console.log("PAGE ERROR:", e.message));
   page.on("console", (m) => { if (m.type() === "error") console.log("CONSOLE ERROR:", m.text()); });
 
-  await page.goto(BASE_URL, { waitUntil: "networkidle" });
+  await page.goto("http://127.0.0.1:8377/index.html", { waitUntil: "networkidle" });
 
   // 1. demo doc loaded
   await page.waitForSelector(".node", { timeout: 5000 });
@@ -112,6 +111,27 @@ function check(name, cond, extra) {
   await page.waitForTimeout(400);
   const yamlPins = await page.inputValue("#yaml-view");
   check("pin mate lands in yaml", /X1: 1[\s\S]*?-->[\s\S]*?X2: 1/.test(yamlPins) || /X1: 1/.test(yamlPins));
+
+  // 5d. pin-to-pin DRAG appends to the same mate set
+  const p1 = await page.locator('g.node:has-text("X1") circle.pin[data-pin="2"]').first().boundingBox();
+  const p2 = await page.locator('g.node:has-text("X2") circle.pin[data-pin="2"]').first().boundingBox();
+  await page.mouse.move(p1.x + p1.width / 2, p1.y + p1.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(p2.x + p2.width / 2, p2.y + p2.height / 2, { steps: 10 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  const listText = await page.locator("#connection-list").textContent();
+  check("pin drag appends to mate set", listText.includes("X1:1,2") && listText.includes("X2:1,2"),
+    listText.slice(0, 90));
+
+  // 5e. double-click a wire opens wire properties (voltage/signal labels, colors)
+  await page.locator(".conn-hit").first().dispatchEvent("dblclick");
+  const wireProps = await page.locator('#inspector h2:has-text("Wire properties")').count();
+  check("dblclick wire shows wire properties", wireProps >= 1);
+  await page.locator("#inspector textarea").first().fill("12V\nGND\nDATA");
+  await page.waitForTimeout(400);
+  const yamlWire = await page.inputValue("#yaml-view");
+  check("wirelabels land in yaml", /wirelabels:[\s\S]*- 12V/.test(yamlWire));
 
   // 6. inspector edits: select X1, change Type via its label
   await page.locator('g.node:has-text("X1")').first().click();
@@ -178,6 +198,20 @@ function check(name, cond, extra) {
   await page.waitForTimeout(300);
   const nodeCountAfterApply = await page.locator(".node").count();
   check("yaml apply round-trips", nodeCountAfterApply >= 4, "count=" + nodeCountAfterApply);
+
+  // 12. resizable bottom panel (drag + persist across reload)
+  const hBefore = await page.evaluate(() => document.getElementById("bottom-panel").getBoundingClientRect().height);
+  const rz = await page.locator("#panel-resizer").boundingBox();
+  await page.mouse.move(rz.x + rz.width / 2, rz.y + rz.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(rz.x + 10, rz.y - 120, { steps: 5 });
+  await page.mouse.up();
+  const hAfter = await page.evaluate(() => document.getElementById("bottom-panel").getBoundingClientRect().height);
+  check("panel resizes by drag", hAfter > hBefore + 80, `before=${hBefore} after=${hAfter}`);
+  await page.reload({ waitUntil: "networkidle" });
+  await page.waitForSelector(".node");
+  const hPersisted = await page.evaluate(() => document.getElementById("bottom-panel").getBoundingClientRect().height);
+  check("panel height persists after reload", Math.abs(hPersisted - hAfter) < 3, `persisted=${hPersisted}`);
 
   await page.screenshot({ path: "/tmp/opencode/wireviz-gui-test.png" });
   await browser.close();
