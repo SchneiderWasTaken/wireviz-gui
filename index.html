@@ -24,9 +24,11 @@
       <h2>Add block</h2>
       <button class="palette-item" data-kind="connector">+ Connector</button>
       <button class="palette-item" data-kind="cable">+ Cable</button>
+      <button class="palette-item" data-kind="splice">+ Splice</button>
       <button class="palette-item" data-kind="note">+ Note</button>
       <h2>Connect</h2>
-      <p class="hint">Drag the round handle on a block's edge onto another block.
+      <p class="hint">Drag the round handle on a block's edge onto another block,
+        or click individual pins on two blocks to connect them pin-for-pin.
         Connector to connector creates a mate; go through a cable to wire pins.
         Select a block or line to edit it on the right. Press Delete to remove.</p>
       <h2>Connections</h2>
@@ -60,6 +62,7 @@
     <div class="tabs">
       <button class="tab active" data-tab="yaml">WireViz YAML</button>
       <button class="tab" data-tab="preview">Preview</button>
+      <button class="tab" data-tab="bom">BOM</button>
       <span id="render-status"></span>
       <button id="panel-toggle" title="Collapse panel">▾</button>
     </div>
@@ -73,6 +76,17 @@
     </div>
     <div id="tab-preview" class="tab-body hidden">
       <div id="preview-holder"><p class="render-note">Click “Render diagram” to generate the real WireViz output in your browser (first run downloads the Python runtime, ~15&nbsp;MB).</p></div>
+      <div class="yaml-actions">
+        <button id="btn-export-html" title="Download a standalone HTML page with the diagram and BOM">Export HTML</button>
+        <label class="field-label" for="pyodide-base">Pyodide base URL</label>
+        <input type="text" id="pyodide-base" placeholder="https://cdn.jsdelivr.net/pyodide/v0.28.3/full/" title="Point at a self-hosted Pyodide copy for offline use. Takes effect on next page load.">
+      </div>
+    </div>
+    <div id="tab-bom" class="tab-body hidden">
+      <div id="bom-holder"><p class="render-note">Render the diagram to generate the bill of materials.</p></div>
+      <div class="yaml-actions">
+        <button id="btn-download-bom">Download BOM .tsv</button>
+      </div>
     </div>
   </footer>
 

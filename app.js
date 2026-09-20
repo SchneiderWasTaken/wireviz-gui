@@ -59,7 +59,9 @@ let doc = null;               // { version, metadata, options, tweak, nodes[], c
 let selection = null;         // { type: 'node'|'connection', id }
 let view = { x: 40, y: 40, scale: 1 };
 let drag = null;              // active pointer interaction
+let pendingPin = null;        // { nodeId, pin, side } awaiting a second pin click
 let pendingImageNode = null;  // node awaiting an image file selection
+let lastRender = null;        // { svg, bom } from the most recent WireViz render
 let pyodidePromise = null;
 let vizInstancePromise = null;
 let imageFilesCache = [];     // images for the current export/render [{path, bytes}]
@@ -168,8 +170,11 @@ function nextDesignator(prefix) {
 }
 
 function defaultNode(kind) {
-  const n = { id: uid(), kind, name: '', x: 120, y: 120, attrs: {} };
-  if (kind === 'connector') {
+  const n = { id: uid(), kind: kind === 'splice' ? 'connector' : kind, name: '', x: 120, y: 120, attrs: {} };
+  if (kind === 'splice') {
+    n.name = nextDesignator('S');
+    n.attrs = { type: 'Splice', style: 'simple' };
+  } else if (kind === 'connector') {
     n.name = nextDesignator('X');
     n.attrs = { type: '', subtype: '', pincount: 4, pinlabels: [] };
   } else if (kind === 'cable') {
@@ -217,7 +222,8 @@ function duplicateNames() {
 /* ============================== YAML export ============================== */
 
 // Convert the editor's pins string into the YAML value WireViz expects.
-// "1-4" stays a string (WireViz expands ranges); "1,3,5" becomes a list.
+// "1-4" stays a string (WireViz expands ranges); "1,3,5" becomes a list;
+// single integers become numbers so WireViz sees ints, not quoted strings.
 function pinsToYamlValue(pins) {
   const s = (pins || '').trim();
   if (!s) return null;
@@ -227,7 +233,7 @@ function pinsToYamlValue(pins) {
       return /^-?\d+$/.test(t) ? parseInt(t, 10) : t;
     });
   }
-  return s;
+  return /^-?\d+$/.test(s) ? parseInt(s, 10) : s;
 }
 
 // Collect embedded images, assigning export paths. Returns [{path, bytes, dataURL}].
@@ -487,11 +493,16 @@ function imageDisplaySize(img) {
   return { w: Math.round(w), h: Math.round(h) };
 }
 
+function isSimpleConnector(n) {
+  return n.kind === 'connector' && n.attrs.style === 'simple';
+}
+
 function nodeSize(n) {
   if (n.kind === 'note') {
     const lines = wrapText(n.text || '', 26);
     return { w: 180, h: 26 + lines.length * 14 + 10 };
   }
+  if (isSimpleConnector(n)) return { w: 110, h: 48 };
   const img = n.attrs.image && n.attrs.image.src ? imageDisplaySize(n.attrs.image) : null;
   let contentH = 22 + 16; // title + subtitle
   if (img) contentH += img.h + 6;
@@ -499,7 +510,8 @@ function nodeSize(n) {
     const labels = (n.attrs.pinlabels || []);
     contentH += labels.length ? Math.min(labels.length, 12) * 13 + 4 : 18;
   } else {
-    contentH += 16 + 16; // swatches + info line
+    const wc = parseInt(n.attrs.wirecount, 10) || 0;
+    contentH += Math.max(1, Math.min(wc || 1, 12)) * 14 + 4 + 16; // wire rows + info line
   }
   return { w: 150, h: Math.max(64, contentH + 8) };
 }
@@ -602,6 +614,14 @@ function renderNode(n) {
   svgEl('rect', { class: 'node-box', width: size.w, height: size.h, rx: 8 }, g);
   svgEl('text', { class: 'node-name', x: 10, y: 17 }, g).textContent = n.kind === 'note' ? 'Note' : n.name;
 
+  if (isSimpleConnector(n)) {
+    const sub = [n.attrs.type, n.attrs.subtype].filter(Boolean).join(' · ');
+    svgEl('text', { class: 'node-sub', x: 10, y: 34 }, g).textContent = sub || 'simple';
+    svgEl('circle', { class: 'handle', cx: 0, cy: size.h / 2, r: 5, 'data-handle': 'left', 'data-node': n.id }, g);
+    svgEl('circle', { class: 'handle', cx: size.w, cy: size.h / 2, r: 5, 'data-handle': 'right', 'data-node': n.id }, g);
+    return g;
+  }
+
   let y = 32;
   if (n.kind !== 'note') {
     const sub = [n.attrs.type, n.attrs.subtype].filter(Boolean).join(' · ');
@@ -624,29 +644,36 @@ function renderNode(n) {
     if (labels.length) {
       const shown = labels.slice(0, 12);
       shown.forEach((lab, i) => {
-        svgEl('text', { class: 'node-line', x: 10, y: y + 11 + i * 13 }, g)
-          .textContent = (i + 1) + ': ' + lab;
+        const rowY = y + 11 + i * 13;
+        svgEl('text', { class: 'node-line', x: 12, y: rowY }, g).textContent = (i + 1) + ': ' + lab;
+        svgEl('circle', pinAttrs(n, i + 1, 'left', 7, rowY - 4), g);
+        svgEl('circle', pinAttrs(n, i + 1, 'right', size.w - 7, rowY - 4), g);
       });
       if (labels.length > 12) {
-        svgEl('text', { class: 'node-info', x: 10, y: y + 11 + 12 * 13 }, g).textContent = '+' + (labels.length - 12) + ' more';
+        svgEl('text', { class: 'node-info', x: 12, y: y + 11 + 12 * 13 }, g).textContent = '+' + (labels.length - 12) + ' more';
       }
     } else {
       const pc = parseInt(n.attrs.pincount, 10);
-      svgEl('text', { class: 'node-info', x: 10, y: y + 14 }, g).textContent = pc ? pc + ' pins' : '';
+      svgEl('text', { class: 'node-info', x: 12, y: y + 14 }, g).textContent = pc ? pc + ' pins' : '';
     }
   } else if (n.kind === 'cable') {
     const sw = cableSwatches(n);
-    sw.slice(0, 9).forEach((c, i) => {
+    const shown = sw.slice(0, 12);
+    shown.forEach((c, i) => {
+      const rowY = y + 8 + i * 14;
       svgEl('rect', {
-        x: 10 + i * 15, y: y + 2, width: 13, height: 10, rx: 2,
-        fill: colorHex(c), stroke: '#94a3b8', 'stroke-width': 0.5,
+        class: 'wire-swatch', x: 12, y: rowY - 8, width: 12, height: 10, rx: 2,
+        fill: colorHex(c),
       }, g);
+      svgEl('text', { class: 'node-line', x: 30, y: rowY }, g).textContent = String(i + 1);
+      svgEl('circle', pinAttrs(n, i + 1, 'left', 7, rowY - 3), g);
+      svgEl('circle', pinAttrs(n, i + 1, 'right', size.w - 7, rowY - 3), g);
     });
-    if (sw.length > 9) {
-      svgEl('text', { class: 'node-info', x: 10 + 9 * 15 + 2, y: y + 11 }, g).textContent = '+' + (sw.length - 9);
+    if (sw.length > 12) {
+      svgEl('text', { class: 'node-info', x: 30, y: y + 8 + 12 * 14 }, g).textContent = '+' + (sw.length - 12) + ' more';
     }
-    y += 16;
-    svgEl('text', { class: 'node-info', x: 10, y: y + 12 }, g).textContent = cableInfoLine(n);
+    y += Math.max(1, shown.length) * 14 + 4;
+    svgEl('text', { class: 'node-info', x: 12, y: y + 12 }, g).textContent = cableInfoLine(n);
   } else {
     const lines = wrapText(n.text || '', 26);
     lines.slice(0, 10).forEach((line, i) => {
@@ -659,6 +686,15 @@ function renderNode(n) {
     svgEl('circle', { class: 'handle', cx: size.w, cy: size.h / 2, r: 5, 'data-handle': 'right', 'data-node': n.id }, g);
   }
   return g;
+}
+
+function pinAttrs(n, pin, side, cx, cy) {
+  const pending = pendingPin && pendingPin.nodeId === n.id && pendingPin.pin === pin && pendingPin.side === side;
+  return {
+    class: 'pin' + (pending ? ' pending' : ''),
+    cx, cy, r: 3.5,
+    'data-pin-node': n.id, 'data-pin': pin, 'data-side': side,
+  };
 }
 
 function colorHex(c) {
@@ -677,11 +713,22 @@ function isSelected(type, id) {
 /* ============================== interactions ============================== */
 
 canvasEl.addEventListener('pointerdown', (e) => {
+  const pinTarget = e.target.closest && e.target.closest('.pin');
   const handleTarget = e.target.closest && e.target.closest('.handle');
   const nodeTarget = e.target.closest && e.target.closest('.node');
   const connTarget = e.target.closest && e.target.closest('.conn-hit');
 
-  if (handleTarget) {
+  if (pinTarget) {
+    const nodeId = pinTarget.getAttribute('data-pin-node');
+    const pin = pinTarget.getAttribute('data-pin');
+    const side = pinTarget.getAttribute('data-side');
+    const node = nodeById(nodeId);
+    if (node) {
+      const w = screenToWorld(e.clientX, e.clientY);
+      drag = { type: 'pin', nodeId, pin, side, sx: e.clientX, sy: e.clientY };
+      canvasEl.setPointerCapture(e.pointerId);
+    }
+  } else if (handleTarget) {
     const node = nodeById(handleTarget.getAttribute('data-node'));
     if (node) {
       const side = handleTarget.getAttribute('data-handle');
@@ -705,6 +752,7 @@ canvasEl.addEventListener('pointerdown', (e) => {
     if (conn) { select('connection', conn.id); renderCanvas(); renderInspector(); }
   } else {
     select(null);
+    pendingPin = null;
     drag = { type: 'pan', sx: e.clientX, sy: e.clientY, vx: view.x, vy: view.y };
     canvasEl.setPointerCapture(e.pointerId);
     renderCanvas();
@@ -735,6 +783,13 @@ canvasEl.addEventListener('pointermove', (e) => {
 
 canvasEl.addEventListener('pointerup', (e) => {
   if (!drag) return;
+  if (drag.type === 'pin') {
+    const moved = Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy);
+    if (moved < 6) handlePinClick(drag.nodeId, drag.pin, drag.side);
+    drag = null;
+    renderCanvas();
+    return;
+  }
   if (drag.type === 'connect') {
     // elementsFromPoint (plural) so overlay lines cannot swallow the drop.
     const candidates = document.elementsFromPoint(e.clientX, e.clientY);
@@ -769,6 +824,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Delete' || e.key === 'Backspace') {
     if (selection) { deleteSelection(); e.preventDefault(); }
   } else if (e.key === 'Escape') {
+    pendingPin = null;
     select(null); renderCanvas(); renderInspector();
   } else if ((e.ctrlKey || e.metaKey) && e.key === 's') {
     e.preventDefault();
@@ -834,6 +890,97 @@ function connect(a, b) {
 function finishConnect() {
   refreshAll();
   scheduleAutosave();
+}
+
+/* ---- pin-level connect ---- */
+
+function handlePinClick(nodeId, pin, side) {
+  const node = nodeById(nodeId);
+  if (!node || node.kind === 'note') return;
+  if (!pendingPin) {
+    pendingPin = { nodeId, pin: Number(pin), side };
+    renderCanvas();
+    return;
+  }
+  if (pendingPin.nodeId === nodeId && pendingPin.pin === Number(pin)) {
+    pendingPin = null; // toggle off
+    renderCanvas();
+    return;
+  }
+  const first = pendingPin;
+  pendingPin = null;
+  connectPins(first, { nodeId, pin: Number(pin), side });
+}
+
+function appendPin(pins, p) {
+  const s = (pins || '').trim();
+  const pinStr = String(p);
+  if (!s) return pinStr;
+  if (s.split(',').map((x) => x.trim()).includes(pinStr)) return s; // dedupe
+  return s + ',' + pinStr;
+}
+
+function connectPins(pa, pb) {
+  const A = nodeById(pa.nodeId), B = nodeById(pb.nodeId);
+  if (!A || !B || A.id === B.id) return;
+  if (A.kind === 'note' || B.kind === 'note') { toast('Notes cannot be connected'); return; }
+  if (A.kind === 'cable' && B.kind === 'cable') {
+    toast('Cables cannot connect directly — use a splice (simple connector)', true);
+    return;
+  }
+
+  // connector <-> connector: accumulate pins into one mate set
+  if (A.kind === 'connector' && B.kind === 'connector') {
+    const existing = doc.connections.find((c) => c.items.length === 2 &&
+      ((c.items[0].nodeId === A.id && c.items[1].nodeId === B.id) ||
+       (c.items[0].nodeId === B.id && c.items[1].nodeId === A.id)));
+    if (existing) {
+      const iA = existing.items[0].nodeId === A.id ? 0 : 1;
+      existing.items[iA].pins = appendPin(existing.items[iA].pins, pa.pin);
+      existing.items[1 - iA].pins = appendPin(existing.items[1 - iA].pins, pb.pin);
+    } else {
+      doc.connections.push({
+        id: uid(),
+        items: [
+          { nodeId: A.id, pins: String(pa.pin) },
+          { nodeId: B.id, pins: String(pb.pin) },
+        ],
+      });
+    }
+    finishConnect();
+    return;
+  }
+
+  // connector <-> cable: extend a partial set or create one
+  const conn = A.kind === 'connector' ? A : B;
+  const connPin = A.kind === 'connector' ? pa.pin : pb.pin;
+  const cab = A.kind === 'cable' ? A : B;
+  const wirePin = A.kind === 'cable' ? pa.pin : pb.pin;
+
+  const partialEnd = doc.connections.find((c) =>
+    c.items.length && c.items[c.items.length - 1].nodeId === cab.id &&
+    !c.items.some((i) => i.nodeId === conn.id));
+  if (partialEnd) {
+    partialEnd.items.push({ nodeId: conn.id, pins: String(connPin) });
+    finishConnect();
+    return;
+  }
+  const partialStart = doc.connections.find((c) =>
+    c.items.length && c.items[0].nodeId === cab.id &&
+    !c.items.some((i) => i.nodeId === conn.id));
+  if (partialStart) {
+    partialStart.items.unshift({ nodeId: conn.id, pins: String(connPin) });
+    finishConnect();
+    return;
+  }
+  doc.connections.push({
+    id: uid(),
+    items: [
+      { nodeId: conn.id, pins: String(connPin) },
+      { nodeId: cab.id, pins: String(wirePin) },
+    ],
+  });
+  finishConnect();
 }
 
 /* ============================== inspector ============================== */
@@ -1063,8 +1210,10 @@ const updateYamlView = debounce(() => {
 
 function switchTab(tab) {
   document.querySelectorAll('.tabs .tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
-  $('tab-yaml').classList.toggle('hidden', tab !== 'yaml');
-  $('tab-preview').classList.toggle('hidden', tab !== 'preview');
+  ['yaml', 'preview', 'bom'].forEach((t) => {
+    const body = $('tab-' + t);
+    if (body) body.classList.toggle('hidden', tab !== t);
+  });
 }
 
 function refreshCanvas() {
@@ -1147,11 +1296,16 @@ function loadScriptOnce(src) {
   });
 }
 
+function pyodideBaseURL() {
+  return (localStorage.getItem('wireviz-gui:pyodide-base') || PYODIDE_BASE).replace(/\/?$/, '/');
+}
+
 function ensurePyodide() {
   if (!pyodidePromise) {
     pyodidePromise = (async () => {
-      await loadScriptOnce(PYODIDE_BASE + 'pyodide.js');
-      const py = await window.loadPyodide({ indexURL: PYODIDE_BASE });
+      const base = pyodideBaseURL();
+      await loadScriptOnce(base + 'pyodide.js');
+      const py = await window.loadPyodide({ indexURL: base });
       setStatus('Installing WireViz…');
       await py.loadPackage('micropip');
       await py.pyimport('micropip').install('wireviz');
@@ -1184,9 +1338,18 @@ async function renderDiagram() {
     setStatus('Rendering with WireViz…');
     const { yaml } = exportYamlDoc('/wv_images');
     py.globals.set('wv_yaml_in', yaml);
-    let svg = py.runPython('from wireviz import wireviz\nwireviz.parse(wv_yaml_in, return_types="svg")');
-    // wireviz's data-URI embed adds a space after the comma; normalize for browsers.
-    svg = svg.replace(/base64, /g, 'base64,');
+    const payload = py.runPython(`
+import json
+from wireviz import wireviz
+from wireviz.wv_bom import bom_list
+_h = wireviz.parse(wv_yaml_in, return_types=("svg", "harness"))
+_svg = _h[0]
+_bom = bom_list(_h[1].bom())
+json.dumps({"svg": _svg, "bom": _bom})
+`);
+    const parsed = JSON.parse(payload);
+    let svg = parsed.svg.replace(/base64, /g, 'base64,');
+    lastRender = { svg, bom: parsed.bom };
     previewHolderEl.textContent = '';
     const holder = document.createElement('div');
     holder.innerHTML = svg;
@@ -1198,6 +1361,7 @@ async function renderDiagram() {
       svgElOut.style.height = 'auto';
     }
     previewHolderEl.appendChild(holder);
+    renderBomTab();
     setStatus('Rendered with WireViz (in-browser)');
   } catch (err) {
     console.error(err);
@@ -1235,6 +1399,96 @@ function exportZipBundle() {
   const zipped = fflate.zipSync(files);
   downloadBlob(new Blob([zipped], { type: 'application/zip' }), name + '_wireviz.zip');
   toast('Bundle exported: harness.yml + images/ — ready for the wireviz CLI.');
+}
+
+/* ---- BOM tab ---- */
+
+function esc(str) {
+  const d = document.createElement('div');
+  d.textContent = str == null ? '' : String(str);
+  return d.innerHTML;
+}
+
+function renderBomTab() {
+  const holder = $('bom-holder');
+  if (!lastRender || !Array.isArray(lastRender.bom) || !lastRender.bom.length) {
+    holder.textContent = '';
+    el('p', { class: 'render-note' }, holder).textContent = 'Render the diagram to generate the bill of materials.';
+    return;
+  }
+  const rows = lastRender.bom; // rows[0] = headings
+  const headings = rows[0];
+  const table = el('table', {}, holder);
+  const thead = el('thead', {}, table);
+  const headRow = el('tr', {}, thead);
+  for (const h of headings) {
+    const th = el('th', {}, headRow);
+    th.textContent = h;
+  }
+  const tbody = el('tbody', {}, table);
+  for (let r = 1; r < rows.length; r++) {
+    const tr = el('tr', {}, tbody);
+    for (let c = 0; c < headings.length; c++) {
+      const td = el('td', { class: headings[c] === 'Qty' ? 'num' : '' }, tr);
+      td.textContent = rows[r][c] == null ? '' : String(rows[r][c]);
+    }
+  }
+}
+
+function downloadBomTsv() {
+  if (!lastRender || !Array.isArray(lastRender.bom)) { toast('Render the diagram first', true); return; }
+  const rows = lastRender.bom;
+  const tsv = rows.map((r) => r.map((cell) => String(cell == null ? '' : cell).replace(/\t/g, ' ')).join('\t')).join('\n');
+  const name = sanitizeFilename((doc.metadata && doc.metadata.title) || 'harness');
+  downloadBlob(new Blob([tsv], { type: 'text/tab-separated-values' }), name + '.bom.tsv');
+}
+
+/* ---- standalone HTML export ---- */
+
+function exportHtml() {
+  if (!lastRender || !lastRender.svg) { toast('Render the diagram first', true); return; }
+  const meta = doc.metadata || {};
+  const title = meta.title || 'WireViz harness';
+  const rows = Array.isArray(lastRender.bom) ? lastRender.bom : null;
+  let bomHtml = '';
+  if (rows && rows.length) {
+    const headings = rows[0];
+    bomHtml = '<h2>Bill of Materials</h2><table><thead><tr>' +
+      headings.map((h) => '<th>' + esc(h) + '</th>').join('') +
+      '</tr></thead><tbody>' +
+      rows.slice(1).map((r) => '<tr>' + headings.map((h, c) =>
+        '<td' + (h === 'Qty' ? ' class="num"' : '') + '>' + esc(r[c]) + '</td>').join('') + '</tr>').join('') +
+      '</tbody></table>';
+  }
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(title)}</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 24px auto; max-width: 1100px; padding: 0 16px; color: #1c2733; }
+  h1 { font-size: 22px; } h2 { font-size: 16px; margin-top: 28px; }
+  .diagram { border: 1px solid #d7dce3; border-radius: 8px; padding: 12px; background: #fff; overflow: auto; }
+  .diagram svg { max-width: 100%; height: auto; }
+  table { border-collapse: collapse; font-size: 13px; width: 100%; }
+  th, td { border: 1px solid #d7dce3; padding: 5px 9px; text-align: left; vertical-align: top; }
+  th { background: #f1f5f9; } td.num { text-align: right; white-space: nowrap; }
+  .meta { color: #64748b; }
+  footer { margin-top: 32px; color: #94a3b8; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>${esc(title)}</h1>
+${meta.description ? '<p class="meta">' + esc(meta.description) + '</p>' : ''}
+<div class="diagram">${lastRender.svg}</div>
+${bomHtml}
+${meta.notes ? '<h2>Notes</h2><p>' + esc(meta.notes) + '</p>' : ''}
+<footer>Generated by WireViz GUI — WireViz-compatible YAML included in the bundle export.</footer>
+</body>
+</html>`;
+  downloadBlob(new Blob([html], { type: 'text/html' }), sanitizeFilename(title) + '.html');
+  toast('Standalone HTML exported (diagram' + (bomHtml ? ' + BOM' : '') + ').');
 }
 
 function loadProjectJSON(text) {
@@ -1388,6 +1642,17 @@ $('btn-copy-yaml').addEventListener('click', async () => {
 });
 $('btn-download-yaml').addEventListener('click', exportYamlFile);
 $('btn-apply-yaml').addEventListener('click', applyYamlEdits);
+$('btn-download-bom').addEventListener('click', downloadBomTsv);
+$('btn-export-html').addEventListener('click', exportHtml);
+
+const pyodideBaseInput = $('pyodide-base');
+pyodideBaseInput.value = localStorage.getItem('wireviz-gui:pyodide-base') || '';
+pyodideBaseInput.addEventListener('change', () => {
+  const v = pyodideBaseInput.value.trim();
+  if (v) localStorage.setItem('wireviz-gui:pyodide-base', v);
+  else localStorage.removeItem('wireviz-gui:pyodide-base');
+  toast(v ? 'Pyodide base URL saved — reload the page to use it' : 'Pyodide base URL reset to default');
+});
 
 document.querySelectorAll('.tabs .tab').forEach((b) => {
   b.addEventListener('click', () => switchTab(b.dataset.tab));

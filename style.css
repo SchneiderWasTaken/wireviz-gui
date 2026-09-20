@@ -116,6 +116,10 @@ aside h2:first-child { margin-top: 0; }
 .node-info { font-size: 10.5px; fill: var(--muted); }
 .handle { fill: #fff; stroke: var(--accent); stroke-width: 1.5; cursor: crosshair; }
 .handle:hover { fill: var(--accent); }
+.pin { fill: #fff; stroke: #64748b; stroke-width: 1; cursor: pointer; }
+.pin:hover { fill: var(--accent); stroke: var(--accent); }
+.pin.pending { fill: var(--accent); stroke: var(--accent); }
+.wire-swatch { stroke: #94a3b8; stroke-width: 0.5; }
 .conn-line { fill: none; stroke: #64748b; stroke-width: 1.6; }
 .conn-hit { fill: none; stroke: transparent; stroke-width: 12; cursor: pointer; }
 .conn.selected .conn-line { stroke: var(--accent); stroke-width: 2.2; }
@@ -196,6 +200,13 @@ aside h2:first-child { margin-top: 0; }
 .yaml-actions { display: flex; flex-direction: column; gap: 6px; flex: 0 0 auto; }
 #preview-holder { flex: 1 1 auto; overflow: auto; background: #fff; border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
 #preview-holder svg { max-width: 100%; height: auto; }
+#bom-holder { flex: 1 1 auto; overflow: auto; background: #fff; border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+#bom-holder table { border-collapse: collapse; font-size: 12px; width: 100%; }
+#bom-holder th, #bom-holder td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
+#bom-holder th { background: #f1f5f9; position: sticky; top: 0; }
+#bom-holder td.num { text-align: right; white-space: nowrap; }
+.field-label { display: block; font-size: 11px; color: var(--muted); margin: 6px 0 2px; }
+#pyodide-base { width: 100%; font-size: 11px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 5px; }
 .render-error { color: var(--danger); white-space: pre-wrap; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
 .render-note { color: var(--muted); font-size: 12px; }
 
