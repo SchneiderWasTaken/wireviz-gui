@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WireViz GUI — visual wiring diagram editor</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand">WireViz GUI <small>visual editor</small></div>
+    <button id="btn-new">New</button>
+    <button id="btn-open">Open…</button>
+    <button id="btn-save">Save</button>
+    <button id="btn-import-yaml">Import YAML</button>
+    <button id="btn-export-yaml">Export YAML</button>
+    <button id="btn-export-zip">Export bundle (.zip)</button>
+    <span class="spacer"></span>
+    <button id="btn-render" class="primary">Render diagram</button>
+  </header>
+
+  <main>
+    <aside id="palette">
+      <h2>Add block</h2>
+      <button class="palette-item" data-kind="connector">+ Connector</button>
+      <button class="palette-item" data-kind="cable">+ Cable</button>
+      <button class="palette-item" data-kind="note">+ Note</button>
+      <h2>Connect</h2>
+      <p class="hint">Drag the round handle on a block's edge onto another block.
+        Connector to connector creates a mate; go through a cable to wire pins.
+        Select a block or line to edit it on the right. Press Delete to remove.</p>
+      <h2>Connections</h2>
+      <ul id="connection-list"></ul>
+    </aside>
+
+    <section id="canvas-wrap">
+      <svg id="canvas" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
+            <circle cx="1" cy="1" r="1" fill="#d3dae3"></circle>
+          </pattern>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"></path>
+          </marker>
+        </defs>
+        <rect id="grid-rect" width="100%" height="100%" fill="url(#grid)"></rect>
+        <g id="world"></g>
+      </svg>
+      <div id="zoom-controls">
+        <button id="zoom-out" title="Zoom out">−</button>
+        <button id="zoom-in" title="Zoom in">+</button>
+        <button id="zoom-fit" title="Fit view">⤢</button>
+      </div>
+    </section>
+
+    <aside id="inspector"><p class="inspector-empty">Select a block or connection to edit it.</p></aside>
+  </main>
+
+  <footer id="bottom-panel">
+    <div class="tabs">
+      <button class="tab active" data-tab="yaml">WireViz YAML</button>
+      <button class="tab" data-tab="preview">Preview</button>
+      <span id="render-status"></span>
+      <button id="panel-toggle" title="Collapse panel">▾</button>
+    </div>
+    <div id="tab-yaml" class="tab-body">
+      <textarea id="yaml-view" spellcheck="false"></textarea>
+      <div class="yaml-actions">
+        <button id="btn-copy-yaml">Copy</button>
+        <button id="btn-download-yaml">Download .yml</button>
+        <button id="btn-apply-yaml" title="Replace the current design with the YAML on the left">Apply edits</button>
+      </div>
+    </div>
+    <div id="tab-preview" class="tab-body hidden">
+      <div id="preview-holder"><p class="render-note">Click “Render diagram” to generate the real WireViz output in your browser (first run downloads the Python runtime, ~15&nbsp;MB).</p></div>
+    </div>
+  </footer>
+
+  <input type="file" id="file-open" accept=".json,.wvproj,.yml,.yaml" hidden>
+  <input type="file" id="file-image" accept="image/*" hidden>
+  <div id="toast" hidden></div>
+
+  <script src="vendor/viz-standalone.js"></script>
+  <script src="vendor/js-yaml.min.js"></script>
+  <script src="vendor/fflate.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
